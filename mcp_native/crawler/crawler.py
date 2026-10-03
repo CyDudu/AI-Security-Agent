@@ -58,6 +58,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from ..browser_launch import launch_kwargs
+
 from shared.scope_match import host_matches, matching_deny_path, path_allowed
 
 from mcp_native.crawler.config import (
@@ -380,8 +382,7 @@ class CrawlTool:
             # no added capabilities (see docker-compose.yml), which is where
             # Chromium's own sandbox usually falls over. --disable-dev-shm-usage
             # avoids crashes against Docker's small default /dev/shm.
-            browser = await pw.chromium.launch(
-                headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            browser = await pw.chromium.launch(**launch_kwargs())
 
             # Optional authentication so the crawl can reach pages behind a login.
             # All three are generic and target-agnostic; any secret is safe here

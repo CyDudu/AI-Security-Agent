@@ -231,14 +231,25 @@ def _to_weakness(hypothesis: str, req: dict, idx: int) -> Weakness | None:
 # --------------------------------------------------------------------------- #
 
 def _generic_probe(req: dict) -> list[str]:
-    """Fallback 'hypothesis' when the model gives no usable one: carry the endpoint
+    """Fallback hypotheses when the model gives no usable one: carry the endpoint
     forward so exploit still probes it. The recorded request is the valuable seed —
     far more than the model's prose — so a high-interest endpoint is never dropped
-    just because the vuln model stalled, refused, or errored."""
-    params = ", ".join(_params_of(req)) or "no observed params"
-    return [f"Untargeted probe — test {req.get('method', 'GET')} "
-            f"{req.get('path', '/')} ({params}) for injection, XSS, and "
-            f"broken access control"]
+    just because the vuln model stalled, refused, or errored.
+
+    One endpoint is fanned out into the standard input-driven vulnerability CLASSES,
+    each as its OWN hypothesis → its own Weakness, so the exploit stage proves them
+    INDEPENDENTLY. A single combined probe let one confirmed class retire the whole
+    endpoint — a search box that is both SQL-injectable AND XSS-injectable was only
+    ever proven for one. This is class-generic (it names no app and no payload); the
+    proving is still entirely the exploit stage's own tools, nothing deterministic."""
+    method = req.get("method", "GET")
+    path = req.get("path", "/")
+    where = f"{method} {path} ({', '.join(_params_of(req)) or 'no observed params'})"
+    return [
+        f"SQL injection — test {where} for SQL injection in each parameter",
+        f"Reflected/DOM XSS — test {where} for cross-site scripting in each parameter",
+        f"Broken access control — test {where} for missing authorization / IDOR",
+    ]
 
 
 async def _reflect(model, messages: list, hypotheses: list[str], config: dict) -> list[str]:

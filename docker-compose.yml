@@ -59,6 +59,9 @@ x-llm-env: &llm-env
   LANGFUSE_SECRET_KEY:       ${LANGFUSE_SECRET_KEY:-}
   LANGFUSE_HOST:             ${LANGFUSE_HOST:-https://cloud.langfuse.com}
   APTS_LANGFUSE_DISABLED:    ${APTS_LANGFUSE_DISABLED:-0}
+  # Stamped on every trace as the Langfuse user id so you can filter "my sessions"
+  # in the UI (session id = engagement id). Override per operator, e.g. =1.
+  APTS_LANGFUSE_USER_ID:     ${APTS_LANGFUSE_USER_ID:-1}
 
 # Shared resource limits for the six working agents.
 x-agent-limits: &agent-limits

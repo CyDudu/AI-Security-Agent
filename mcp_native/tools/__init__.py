@@ -9,10 +9,15 @@ tool is: drop a module in here, give it a ``register(mcp)``, and add its name to
 from __future__ import annotations
 
 from mcp_native.tools import (
+    arjun_tool,
     attack_tool,
     crawl_tool,
+    crawl_v2_tool,
+    ffuf_tool,
     hacktricks_tool,
     http_tool,
+    katana_tool,
+    playwright_live,
     recon_tool,
     sandbox_tool,
     sqlmap_tool,
@@ -20,8 +25,11 @@ from mcp_native.tools import (
 )
 
 # The modules server.py will register, in order. Add new tool modules here.
+# The new-recon pipeline (RECON-MIGRATION.md) adds katana/ffuf/arjun/crawl_v2 and
+# the playwright_live peek+primitives.
 ALL = (http_tool, xss_prove, recon_tool, sqlmap_tool, hacktricks_tool,
-       crawl_tool, attack_tool, sandbox_tool)
+       crawl_tool, attack_tool, sandbox_tool,
+       katana_tool, ffuf_tool, arjun_tool, crawl_v2_tool, playwright_live)
 
 
 def register_all(mcp) -> list[str]:

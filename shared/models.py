@@ -240,6 +240,21 @@ class ObservedRequest(BaseModel):
 class AssetMap(BaseModel):
     """The attack surface Recon discovered; consumed by Vulnerability Assessment."""
     target_url: str
+    # Agentic-recon additions (RECON-MIGRATION.md). Additive — downstream stages that
+    # only read endpoints/observed_requests keep working unchanged.
+    mode: str = Field(default="", description="Recon mode used: 'broad' | 'focused'.")
+    summary: str = Field(default="", description="Model's 2-4 sentence summary of the "
+                         "security-relevant surface.")
+    findings: list[dict] = Field(default_factory=list,
+        description="Graded, grouped recon findings. Each: {finding, where, category, "
+                    "grade, reason, page, request}. The vuln stage folds high/medium "
+                    "findings into the register with the raw request as origin.")
+    findings_tree: dict = Field(default_factory=dict,
+        description="Findings grouped for the report/UI: rogue (no backing page) first, "
+                    "then per page; each finding keeps its raw captured request.")
+    request_tree: dict = Field(default_factory=dict,
+        description="Derived UI view: summary + tech, then notable requests per page. "
+                    "observed_requests stays authoritative.")
     endpoints: list[Endpoint] = Field(default_factory=list)
     forms: list[Form] = Field(default_factory=list)
     technologies: list[Technology] = Field(default_factory=list)

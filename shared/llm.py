@@ -274,9 +274,14 @@ def run_config(engagement_id: str = "", agent: str = "", **metadata) -> dict:
     cfg: dict = {"callbacks": langfuse_callbacks()}
     if meta:
         cfg["metadata"] = meta
+    cfg.setdefault("metadata", {})
     if engagement_id:
         # Langfuse reads these reserved metadata keys to group a trace.
         cfg["metadata"]["langfuse_session_id"] = str(engagement_id)
+    # Stamp a Langfuse user id on every trace so an operator can filter "my sessions"
+    # in the UI (Langfuse reads the reserved `langfuse_user_id` metadata key). Set
+    # APTS_LANGFUSE_USER_ID to your own id (e.g. "1"); defaults to a stable label.
+    cfg["metadata"]["langfuse_user_id"] = os.environ.get("APTS_LANGFUSE_USER_ID", "apts")
     if agent:
         cfg["run_name"] = f"{agent}-loop"
     return cfg
@@ -330,6 +335,15 @@ def trace_run(name: str, run_input=None, prompt=None, engagement_id: str = ""):
         yield None
         return
     with span_cm as span:
+        # Stamp the trace with a user id (+ session = engagement) so an operator can
+        # filter "my sessions" in the Langfuse UI. The root span owns the trace, so
+        # set it here; guarded because the API shape varies across Langfuse versions.
+        try:
+            span.update_trace(
+                user_id=os.environ.get("APTS_LANGFUSE_USER_ID", "apts"),
+                session_id=str(engagement_id) if engagement_id else None)
+        except Exception as exc:  # noqa: BLE001 — tracing must never break the stage
+            log.debug("Langfuse update_trace(user/session) failed: %s", exc)
         yield span
 
 

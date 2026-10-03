@@ -594,8 +594,8 @@ async def test_all_stage_system_prompts_register():
     import agent.services.workers.script.script_worker   # noqa: F401
     import agent.services.workers.adviser.adviser_worker  # noqa: F401
     from shared import prompts
-    for pid in ("recon.rank", "vuln.system", "mitre.system", "exploit.system",
-                "script.system", "adviser.system"):
+    for pid in ("recon.loop", "recon.grade", "vuln.system", "mitre.system",
+                "exploit.system", "script.system", "adviser.system"):
         assert prompts.get(pid).text  # a non-empty default is registered
 
 
@@ -741,78 +741,27 @@ async def test_script_worker_rejects_unsafe_source(monkeypatch):
     assert result["rejected"] == 1
 
 
-async def test_recon_worker_triages_observed_requests(monkeypatch):
-    """Crawl is authoritative; the model ranks (never invents) the observed requests."""
+async def test_recon_phase0_fails_loud_on_empty_katana(monkeypatch):
+    """New recon is FAIL-LOUD: katana returning 0 endpoints aborts (no blind run)."""
+    import pytest
     from agent.services.workers.recon import recon_worker as R
-    from agent.services.workers.base import WorkContext
+    from agent.services.workers.base import WorkContext, WorkFailed
     from shared.models import Scope
-
-    scripted = ScriptedModel(responses=[
-        AIMessage(content='{"rankings":[{"i":0,"interest":"high","reason":"login takes input"}]}'),
-    ])
-    monkeypatch.setattr(R, "build_chat_model", lambda *a, **k: scripted)
-    fake = FakeMcpClient(
-        [_Descriptor("crawl", "crawl", {"type": "object", "properties": {}})],
-        {"crawl": {
-            "pages": [{"url": "http://t.test/#/login", "status": 200,
-                       "content_type": "text/html"}],
-            "observed_requests": [{
-                "method": "POST", "url": "http://t.test/rest/user/login",
-                "post_data": '{"email":"a@b.c"}',
-                "source_page": "http://t.test/#/login"}],
-            "technologies": [], "forms": [], "js_api_paths": [],
-            "third_party_hosts": [], "pages_crawled": 1}})
+    fake = FakeMcpClient([], {"katana": {"endpoints": [], "count": 0}})
     monkeypatch.setattr(R, "Client", lambda url: fake)
-
-    ctx = WorkContext(
-        engagement_id=uuid.uuid4(), target_url="http://t.test/",
-        scope=Scope(domains=["t.test"]), upstream={}, directive="")
-    result = await R.ReconWorker()(ctx)
-    assert len(result["observed_requests"]) == 1
-    assert result["observed_requests"][0]["interest"] == "high"
+    ctx = WorkContext(engagement_id=uuid.uuid4(), target_url="http://t.test/",
+                      scope=Scope(domains=["t.test"]), upstream={}, directive="")
+    with pytest.raises(WorkFailed):
+        await R.ReconWorker()(ctx)
 
 
-def test_recon_deterministic_interest_demotes_noise_promotes_api():
-    """socket.io/static -> low (so it can't flood the high-interest index); input &
-    REST/API endpoints -> high (so a bad LLM rating can't drop them from vuln's set)."""
-    from agent.services.workers.recon.recon_worker import _deterministic_interest
-    from shared.models import ObservedRequest
-
-    def R_(method, url, post_data=None, resource_type="xhr"):
-        return ObservedRequest(method=method, url=url, post_data=post_data,
-                               resource_type=resource_type)
-
-    assert _deterministic_interest(R_("GET", "http://t/rest/products/search?q=a")) == "high"
-    assert _deterministic_interest(R_("POST", "http://t/rest/user/login",
-                                      post_data='{"email":"a"}')) == "high"
-    assert _deterministic_interest(R_("GET", "http://t/api/Users/1")) == "high"  # IDOR, no param
-    assert _deterministic_interest(R_("GET", "http://t/socket.io/?EIO=4")) == "low"
-    assert _deterministic_interest(R_("POST", "http://t/socket.io/", post_data="x",
-                                      resource_type="websocket")) == "low"
-    assert _deterministic_interest(R_("GET", "http://t/main.js", resource_type="script")) == "low"
-    assert _deterministic_interest(R_("GET", "http://t/", resource_type="document")) is None  # defer
-
-
-async def test_recon_override_beats_llm_misrating(monkeypatch):
-    """Even when the LLM rates socket.io 'high', the deterministic pass demotes it."""
-    from agent.services.workers.recon import recon_worker as R
-    from shared.models import ObservedRequest
-
-    scripted = ScriptedModel(responses=[
-        AIMessage(content='{"rankings":[{"i":0,"interest":"high","reason":"looks busy"},'
-                          '{"i":1,"interest":"low","reason":"dunno"}]}'),
-    ])
-    monkeypatch.setattr(R, "build_chat_model", lambda *a, **k: scripted)
-    observed = [
-        ObservedRequest(method="POST", url="http://t/socket.io/", post_data="x",
-                        resource_type="websocket", source_page="p"),
-        ObservedRequest(method="GET", url="http://t/rest/products/search?q=a",
-                        resource_type="xhr", source_page="p"),
-    ]
-    await R.ReconWorker()._verify(scripted, {}, observed)
-    by_path = {o.url: o.interest for o in observed}
-    assert by_path["http://t/socket.io/"] == "low"             # demoted despite LLM "high"
-    assert by_path["http://t/rest/products/search?q=a"] == "high"  # promoted despite LLM "low"
+def test_recon_normalize_url_keeps_spa_hash_route():
+    """De-dup identity: host-lowercased + trailing slash dropped, but an SPA hash
+    route (#/search) is KEPT (on a single-page app the hash IS the page)."""
+    from agent.services.workers.recon.recon_graph import normalize_url
+    assert normalize_url("http://T/a/") == normalize_url("http://t/a")
+    assert "#/search" in normalize_url("http://t/#/search")
+    assert normalize_url("http://t/#/search") != normalize_url("http://t/#/login")
 
 
 async def test_adviser_reason_uses_model_findings():

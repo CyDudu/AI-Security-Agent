@@ -27,6 +27,8 @@ from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
 
+from ..browser_launch import launch_kwargs
+
 
 def _snippet(text: str, needle: str) -> str | None:
     i = text.find(needle)
@@ -151,7 +153,7 @@ async def xss_prove(
 
     try:
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(chromium_sandbox=False, args=["--no-sandbox"])
+            browser = await pw.chromium.launch(**launch_kwargs(chromium_sandbox=False))
             try:
                 # A session-aware context: extra headers (e.g. Authorization) apply
                 # to navigation and the store request; cookies are added for the
