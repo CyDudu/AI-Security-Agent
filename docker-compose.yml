@@ -220,6 +220,10 @@ services:
       # APTS_VULN_MAX_REQUESTS was dead — nothing read it — so it is gone.)
       APTS_VULN_MAX_STEPS:   ${APTS_VULN_MAX_STEPS:-5}
       APTS_VULN_MAX_TOKENS:  ${APTS_VULN_MAX_TOKENS:-900}
+      # vuln is LLM-bound (no heavy local tool), so it parallelises well. With
+      # full-surface assessment it now has far more endpoints to triage, so raise
+      # the in-flight assessments from 5 to 10 to cut wall-clock.
+      APTS_VULN_CONCURRENCY: ${APTS_VULN_CONCURRENCY:-10}
     secrets:
       - source: agent_vuln_token
         target: token
@@ -283,7 +287,11 @@ services:
       APTS_LOOP_LLM_URL:     ${APTS_LOOP_LLM_URL:-https://bedrock-mantle.eu-north-1.api.aws/v1/chat/completions}
       APTS_LOOP_LLM_MODEL:   ${APTS_LOOP_LLM_MODEL:-qwen.qwen3-coder-480b-a35b-instruct}
       APTS_LOOP_LLM_TIMEOUT: ${APTS_LOOP_LLM_TIMEOUT:-300}
-      APTS_LOOP_MAX_STEPS:   ${APTS_LOOP_MAX_STEPS:-50}
+      # A deterministic proof (sqlmap injectable / xss_prove executed) lands in 1-3
+      # steps; 50 was only ever consumed by the model flailing on unprovable classes,
+      # which full-surface assessment now produces many of. 20 keeps every real proof
+      # while capping the wasted turns per candidate — the biggest exploit speedup.
+      APTS_LOOP_MAX_STEPS:   ${APTS_LOOP_MAX_STEPS:-20}
       # How many candidate weaknesses the exploit stage actually tries to prove,
       # and how many it proves at once. 8 replicas behind the sticky LB mean up to
       # CONCURRENCY proofs each land on their own target instance, so a heavy
