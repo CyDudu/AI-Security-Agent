@@ -572,8 +572,10 @@ async def test_exploit_lc_proven_without_signal_is_model_judgment(monkeypatch):
     result = await worker(ctx)
 
     a = result["attempts"][0]
-    assert a["confirmed"] is True
-    # A PROVEN verdict with no tool signal is flagged model_judgment, not upgraded.
+    # A PROVEN verdict with NO deterministic tool signal is NOT confirmed — it is a
+    # candidate for manual review (model_judgment), never a reported finding.
+    assert a["confirmed"] is False
+    assert a["candidate"] is True
     assert a["signal_basis"] == "model_judgment"
     # No creds ⇒ no CREDENTIAL injection. The only header added is the sticky-LB
     # routing header (always present); no Authorization/Cookie slipped in.

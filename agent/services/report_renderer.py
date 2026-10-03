@@ -94,6 +94,34 @@ def render_markdown(report: EngagementReport) -> str:
                 out.append(f"*{evidence.note}*")
             out.append("")
 
+    # ---- Candidate findings (model-assessed, unverified) -------------- #
+    if report.candidate_findings:
+        out.append("## Candidate findings (model-assessed — verify manually)")
+        out.append("")
+        out.append("These weaknesses were judged exploitable by the model but were "
+                   "**NOT** confirmed by a deterministic tool (sqlmap / xss_prove). "
+                   "They are not counted among the confirmed findings or the risk "
+                   "score — treat each as a lead to verify by hand.")
+        out.append("")
+        out.append("| ID | Severity (assessed) | Asset | Candidate finding |")
+        out.append("|---|---|---|---|")
+        for f in report.candidate_findings:
+            out.append(f"| {f.id} | {f.severity} | `{f.asset}` | {f.title} |")
+        out.append("")
+        for f in report.candidate_findings:
+            out.append(f"### {f.id} — {f.title} _(candidate — unverified)_")
+            out.append("")
+            out.append(f"- **Asset:** `{f.asset}`")
+            out.append(f"- **Severity (model-assessed):** {f.severity}")
+            out.append(f"- **Status:** {f.status}")
+            if f.technique_ids:
+                out.append(f"- **ATT&CK:** {', '.join(f.technique_ids)}")
+            out.append(f"- **Remediation effort:** {f.effort}")
+            out.append("")
+            if f.recommendation:
+                out.append(f"**Recommendation.** {f.recommendation}")
+                out.append("")
+
     # ---- Playbook ----------------------------------------------------- #
     out.append("## Attack playbook")
     out.append("")

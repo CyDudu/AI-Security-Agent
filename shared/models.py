@@ -349,6 +349,10 @@ class ExploitAttempt(BaseModel):
     """
     weakness_id: str
     confirmed: bool
+    candidate: bool = Field(default=False,
+        description="The model judged the weakness exploitable but NO deterministic "
+                    "tool signal (sqlmap/xss_prove) backed it. Reported as a candidate "
+                    "for manual review, never as a confirmed finding.")
     payload: str = ""
     detection: str = Field(default="",
         description="The deterministic signal checked for, stated before the "
@@ -471,6 +475,11 @@ class EngagementReport(BaseModel):
     generated_at: datetime = Field(default_factory=datetime.utcnow)
     executive_summary: ExecutiveSummary
     findings: list[Finding] = Field(default_factory=list)
+    candidate_findings: list[Finding] = Field(default_factory=list,
+        description="Weaknesses the model judged exploitable but that NO deterministic "
+                    "tool (sqlmap/xss_prove) confirmed. Full write-ups, reported in "
+                    "their own section for manual verification — never counted among "
+                    "the confirmed findings or in the risk score.")
     playbook: AttackPlaybook = Field(default_factory=AttackPlaybook)
     attack_coverage: dict[str, list[str]] = Field(default_factory=dict,
         description="ATT&CK technique ID → the findings that exercised it.")

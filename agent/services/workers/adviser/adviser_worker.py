@@ -76,50 +76,71 @@ class AdviserWorker:
         attempts = {a["weakness_id"]: a for a in exploitation.get("attempts", [])}
         mappings = attack_map.get("mappings", {})
 
-        # Proven only. The unproven/untested are counted (coverage + caveats), not
-        # listed as findings.
+        # Proven only — a finding needs a DETERMINISTIC tool proof (confirmed).
+        # Weaknesses the model merely JUDGED exploitable with no tool signal are
+        # CANDIDATES: counted and called out for manual review, never listed as
+        # confirmed findings (that is what kept the report honest-sized).
         proven = [w for w in weaknesses
                   if attempts.get(w.get("id"), {}).get("confirmed")]
+        candidates = [w for w in weaknesses
+                      if attempts.get(w.get("id"), {}).get("candidate")]
         groups = self._pregroup(proven, attempts, mappings)
+        cand_groups = self._pregroup(candidates, attempts, mappings)
 
         model = build_chat_model("adviser", max_tokens=MAX_TOKENS)
         config = run_config(engagement_id=str(ctx.engagement_id), agent="adviser")
+        candidate_findings: list[Finding] = []
         with trace_run(name="adviser",
                        run_input={"groups": [g["key"] for g in groups]},
                        engagement_id=str(ctx.engagement_id)) as _stage:
             try:
+                directive_block = agentic.directive_block(ctx.directive)
                 findings, narrative = await self._reason(
-                    groups, agentic.directive_block(ctx.directive), model, config)
+                    groups, directive_block, model, config)
+                # Enrich the model-judged candidates the same way, flagged unverified,
+                # for their own report section — this is the comprehensive breadth
+                # without presenting it as tool-proven.
+                if cand_groups:
+                    candidate_findings, _ = await self._reason(
+                        cand_groups, directive_block, model, config, confirmed=False)
             finally:
                 flush()  # short-lived stage: push any buffered Langfuse spans
             set_run_output(_stage, {
                 "findings": len(findings),
+                "candidate_findings": len(candidate_findings),
                 "items": [{"id": f.id, "title": f.title, "severity": f.severity}
                           for f in findings]})
 
         n_total = len(weaknesses)
         n_tested = len(attempts)
         n_proven = len(proven)
-        coverage = (f"{n_tested} hypotheses tested, {n_proven} proven and reported"
+        n_candidates = len(candidates)
+        coverage = (f"{n_tested} hypotheses tested, {n_proven} proven (deterministic "
+                    f"tool signal) and reported"
+                    f"{f'; {n_candidates} model-judged candidate(s) for manual review' if n_candidates else ''}"
                     f"{f'; {n_total - n_tested} not tested' if n_total > n_tested else ''}"
-                    f". Unproven candidates are in the raw artifacts, not shown as findings.")
+                    f". Only tool-proven weaknesses are shown as findings; candidates "
+                    f"and unproven hypotheses are in the raw artifacts.")
 
         report = EngagementReport(
             engagement_id=str(ctx.engagement_id),
             target_url=ctx.target_url,
             executive_summary=self._summarise(findings, narrative, coverage),
             findings=findings,
+            candidate_findings=candidate_findings,
             playbook=AttackPlaybook(**playbook_raw) if playbook_raw else AttackPlaybook(),
             attack_coverage=self._coverage(mappings, {f.id for f in findings}),
             exploitation_confirmed=n_proven > 0,
             caveats=self._caveats(asset_map, register, exploitation,
-                                  n_total, n_tested, n_proven),
+                                  n_total, n_tested, n_proven, candidates, attempts),
             loot=self._dedup_loot(exploitation.get("loot", [])),
         )
 
         paths = self._reports.save(report)
-        log.info("report: %d grouped finding(s) from %d proven weakness(es) → %s",
-                 len(findings), n_proven, ", ".join(paths))
+        log.info("report: %d confirmed finding(s) from %d proven weakness(es), "
+                 "%d candidate finding(s) from %d model-judged → %s",
+                 len(findings), n_proven, len(candidate_findings), n_candidates,
+                 ", ".join(paths))
         trace.record("report_written", {
             "paths": paths, "findings": len(findings), "confirmed": n_proven,
             "risk_score": report.executive_summary.risk_score})
@@ -218,9 +239,12 @@ class AdviserWorker:
     # --- the reasoning loop ---------------------------------------------- #
 
     async def _reason(self, groups: list[dict], directive: str,
-                      model, config: dict) -> tuple[list[Finding], str]:
+                      model, config: dict, confirmed: bool = True
+                      ) -> tuple[list[Finding], str]:
         """Model assigns severity/impact/fix and orders the groups. Bounded loop
-        with a deterministic fallback so a report is always produced."""
+        with a deterministic fallback so a report is always produced. ``confirmed``
+        False enriches the model-judged CANDIDATE groups the same way, but the
+        findings are flagged unverified (for the separate candidate section)."""
         if not groups:
             return [], ("No weaknesses were proven exploitable within the scope "
                         "and time window of this engagement.")
@@ -242,7 +266,11 @@ class AdviserWorker:
             return out
         listing = "\n".join(_line(g) for g in groups)
         system = prompts.get(ADVISER_SYSTEM_PROMPT_ID)  # Langfuse-backed, default fallback
-        user = directive + "## Confirmed, grouped findings\n" + listing
+        header = ("## Confirmed, grouped findings\n" if confirmed else
+                  "## CANDIDATE weaknesses — the model judged these exploitable but NO "
+                  "deterministic tool confirmed them. Write them up the same way; they "
+                  "are reported separately as candidates for manual review.\n")
+        user = directive + header + listing
         convo = agentic.to_lc_messages(system.text, user)
 
         by_key = {g["key"]: g for g in groups}
@@ -258,7 +286,7 @@ class AdviserWorker:
                 data = _parse_json(reply)
                 items = data.get("findings") if isinstance(data, dict) else None
                 if isinstance(items, list) and items:
-                    findings = self._to_findings(items, by_key)
+                    findings = self._to_findings(items, by_key, confirmed=confirmed)
                     if findings:
                         set_run_output(span, f"{len(findings)} finding(s)")
                         return findings, str(data.get("narrative") or "")
@@ -272,8 +300,11 @@ class AdviserWorker:
 
         log.warning("adviser reasoning did not yield usable findings; "
                     "falling back to deterministic grouping")
-        return self._fallback(groups), ("Automated summary: the findings below "
-                                        "were proven exploitable during the test.")
+        narrative = ("Automated summary: the findings below were proven exploitable "
+                     "during the test." if confirmed else
+                     "Automated summary: the items below were judged exploitable by the "
+                     "model but not confirmed by any tool — verify manually.")
+        return self._fallback(groups, confirmed=confirmed), narrative
 
     @staticmethod
     def _merge_groups(gs: list[dict]) -> dict:
@@ -302,7 +333,8 @@ class AdviserWorker:
             key=lambda s: _SEVERITY_RANK.get(s, 9))[0]
         return m
 
-    def _to_findings(self, items: list[dict], by_key: dict) -> list[Finding]:
+    def _to_findings(self, items: list[dict], by_key: dict,
+                     confirmed: bool = True) -> list[Finding]:
         findings: list[Finding] = []
         used: set[str] = set()
         for it in items:
@@ -323,31 +355,39 @@ class AdviserWorker:
                                           title=str(it.get("title") or g["label"]),
                                           impact=str(it.get("impact") or ""),
                                           rec=str(it.get("recommendation") or ""),
-                                          effort=str(it.get("effort", "medium")).lower()))
-        # Any group the model dropped is still a proven finding — never lose it.
+                                          effort=str(it.get("effort", "medium")).lower(),
+                                          confirmed=confirmed))
+        # Any group the model dropped is still a finding — never lose it.
         for g in by_key.values():
             if g["key"] not in used:
-                findings.append(self._finding(g, g["default_severity"]))
+                findings.append(self._finding(g, g["default_severity"],
+                                              confirmed=confirmed))
         findings.sort(key=lambda f: (_SEVERITY_RANK.get(f.severity, 9), -f.cvss_score))
         return findings
 
-    def _fallback(self, groups: list[dict]) -> list[Finding]:
-        findings = [self._finding(g, g["default_severity"]) for g in groups]
+    def _fallback(self, groups: list[dict], confirmed: bool = True) -> list[Finding]:
+        findings = [self._finding(g, g["default_severity"], confirmed=confirmed)
+                    for g in groups]
         findings.sort(key=lambda f: (_SEVERITY_RANK.get(f.severity, 9), -f.cvss_score))
         return findings
 
     @staticmethod
     def _finding(g: dict, severity: str, *, title: str = "", impact: str = "",
-                 rec: str = "", effort: str = "medium") -> Finding:
-        note = f"Confirmed via {g['count']} attempt(s)."
-        recommendation = " ".join(p for p in (impact, rec) if p).strip() or note
+                 rec: str = "", effort: str = "medium", confirmed: bool = True) -> Finding:
         n_hyp = len(g.get("hypotheses", []) or g.get("wids", []))
-        status = (f"confirmed exploitable ({g['count']} proof(s)"
-                  + (f"; merged from {n_hyp} hypotheses" if n_hyp > 1 else "") + ")")
+        if confirmed:
+            note = f"Confirmed via {g['count']} attempt(s)."
+            status = (f"confirmed exploitable ({g['count']} proof(s)"
+                      + (f"; merged from {n_hyp} hypotheses" if n_hyp > 1 else "") + ")")
+        else:
+            note = "Model-assessed; no deterministic tool proof. Verify manually."
+            status = (f"candidate — model-assessed, NOT tool-proven ({g['count']} "
+                      f"hypothesis(es)); verify manually")
+        recommendation = " ".join(p for p in (impact, rec) if p).strip() or note
         return Finding(
             id=g["wids"][0], title=title or g["label"], asset=g["asset"],
             severity=severity, cvss_score=_SEVERITY_SCORE.get(severity, 5.0),
-            cvss_vector="", confirmed=True,
+            cvss_vector="", confirmed=confirmed,
             status=status,
             technique_ids=list(g["techniques"]), owasp_category="",
             recommendation=recommendation,
@@ -380,16 +420,36 @@ class AdviserWorker:
 
     @staticmethod
     def _caveats(asset_map: dict, _register: dict, exploitation: dict,
-                 n_total: int, n_tested: int, n_proven: int) -> list[str]:
+                 n_total: int, n_tested: int, n_proven: int,
+                 candidates: list[dict] | None = None,
+                 attempts: dict | None = None) -> list[str]:
         """State what limits these results. Generated from the run, not boilerplate."""
         caveats = [
             "Produced by an autonomous pipeline with no human review. Findings "
             "should be validated by a security engineer before remediation is "
             "prioritised or the results are shared externally.",
-            f"Only proven findings are listed. Of {n_total} candidate weakness(es), "
-            f"{n_tested} were tested for exploitability and {n_proven} were proven; "
-            f"the remainder are hypotheses and are not reported as findings.",
+            f"Only tool-proven findings are listed. Of {n_total} candidate weakness(es), "
+            f"{n_tested} were tested for exploitability and {n_proven} were proven by a "
+            f"deterministic signal (sqlmap/xss_prove); the remainder are hypotheses and "
+            f"are not reported as findings.",
         ]
+        # Model-judged candidates: the model called these exploitable but no
+        # deterministic tool backed it. List them (capped) for manual review so they
+        # are visible without being presented as confirmed findings.
+        candidates = candidates or []
+        attempts = attempts or {}
+        if candidates:
+            labels = []
+            for w in candidates[:15]:
+                att = attempts.get(w.get("id"), {})
+                what = att.get("proven_vuln") or w.get("title") or "weakness"
+                labels.append(f"{str(what)[:60]} @ {w.get('asset', '?')}")
+            more = f" (+{len(candidates) - 15} more)" if len(candidates) > 15 else ""
+            caveats.append(
+                f"{len(candidates)} weakness(es) were judged exploitable by the model "
+                f"but NOT confirmed by any deterministic tool (sqlmap/xss_prove). They "
+                f"need manual review and are NOT counted as findings: "
+                f"{'; '.join(labels)}{more}.")
         if asset_map.get("truncated"):
             caveats.append(
                 f"The crawl hit a configured limit after "

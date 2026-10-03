@@ -135,18 +135,42 @@ class RunProvider:
             # requests are already safe inside the saved AssetMap.
             if self._recon_index is not None:
                 try:
-                    observed = result.get("observed_requests", [])
-                    # The recon ARTIFACT keeps every observed request in full (the
-                    # complete picture, queryable and available to any stage). The
-                    # vuln-facing INDEX stays the high-interest working set so the
-                    # assessment loop is not flooded with static/low-value calls;
-                    # fall back to everything if nothing was rated high.
-                    to_index = [r for r in observed
-                                if r.get("interest") == "high"] or observed
+                    from urllib.parse import urljoin, urlparse
+                    observed = result.get("observed_requests", []) or []
+                    # Assess the WHOLE discovered surface, not just the high-interest
+                    # working set: every non-static observed request PLUS a synthetic
+                    # GET for each discovered API/endpoint path not already observed —
+                    # so vuln generates hypotheses across the full attack surface
+                    # (comprehensive coverage, at the cost of a longer run). Bounded
+                    # downstream by list_recorded_requests (dedup by method+path,
+                    # capped) and vuln's own noise filter. Static/transport (low
+                    # interest) is left out — it is not assessable surface.
+                    seen = {(r.get("method", "GET"),
+                             urlparse(r.get("url", "") or "").path or r.get("path", ""))
+                            for r in observed}
+                    to_index = [r for r in observed if r.get("interest") != "low"]
+                    base = result.get("target_url", "") or ""
+                    surface: set[str] = set(result.get("api_paths", []) or [])
+                    for e in (result.get("endpoints", []) or []):
+                        pth = e.get("path") if isinstance(e, dict) else e
+                        if pth:
+                            surface.add(str(pth))
+                    added = 0
+                    for p in sorted(surface):
+                        path = urlparse(p).path or p
+                        if not path or ("GET", path) in seen:
+                            continue
+                        seen.add(("GET", path))
+                        url = p if str(p).startswith("http") else urljoin(base or "/", path)
+                        to_index.append({"method": "GET", "url": url, "path": path,
+                                         "resource_type": "fetch", "interest": "medium",
+                                         "source_page": base})
+                        added += 1
                     n = self._recon_index.index(engagement_id, to_index)
-                    log.info("indexed %d of %d observed requests for lookup "
-                             "(high-interest working set; full set in the artifact)",
-                             n, len(observed))
+                    log.info("indexed %d request(s) for assessment — full surface "
+                             "(%d observed non-static + %d synthesised endpoints; "
+                             "%d observed total)", n, len(to_index) - added, added,
+                             len(observed))
                 except Exception as exc:
                     log.error("recon request indexing failed: %s", exc)
             trace.record("stage_output",
