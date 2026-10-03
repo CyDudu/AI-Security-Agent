@@ -308,42 +308,45 @@ def trace_run(name: str, run_input=None, prompt=None, engagement_id: str = ""):
     Session/user grouping still rides the ``metadata`` set by :func:`run_config`.
     """
     client = _client()
-    span_cm = None
-    if client is not None:
-        obs_kwargs = {"name": name, "as_type": "span", "input": run_input}
-        if prompt is not None:
-            # Links every generation in the run to this prompt version, so a
-            # "which prompt version regressed?" question is answerable from traces.
-            obs_kwargs["prompt"] = prompt
-        if engagement_id:
-            # One tree for the WHOLE engagement: seed a deterministic trace id from
-            # the engagement id so every stage — each a separate process — writes
-            # its spans into the SAME Langfuse trace instead of one trace per loop.
-            # The per-stage span opened here becomes a top-level node of that single
-            # tree, and the per-request spans nest under it.
-            try:
-                obs_kwargs["trace_context"] = {
-                    "trace_id": client.create_trace_id(seed=str(engagement_id))}
-            except Exception as exc:  # noqa: BLE001 — fall back to an un-seeded trace
-                log.debug("trace_id seed failed: %s", exc)
-        try:
-            span_cm = client.start_as_current_observation(**obs_kwargs)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Langfuse trace_run(%s) failed to start: %s", name, exc)
-            span_cm = None
-    if span_cm is None:
+    if client is None:
         yield None
         return
-    with span_cm as span:
-        # Stamp the trace with a user id (+ session = engagement) so an operator can
-        # filter "my sessions" in the Langfuse UI. The root span owns the trace, so
-        # set it here; guarded because the API shape varies across Langfuse versions.
+    obs_kwargs = {"name": name, "as_type": "span", "input": run_input}
+    if prompt is not None:
+        # Links every generation in the run to this prompt version, so a
+        # "which prompt version regressed?" question is answerable from traces.
+        obs_kwargs["prompt"] = prompt
+    if engagement_id:
+        # One tree for the WHOLE engagement: seed a deterministic trace id from
+        # the engagement id so every stage — each a separate process — writes
+        # its spans into the SAME Langfuse trace instead of one trace per loop.
+        # The per-stage span opened here becomes a top-level node of that single
+        # tree, and the per-request spans nest under it.
         try:
-            span.update_trace(
+            obs_kwargs["trace_context"] = {
+                "trace_id": client.create_trace_id(seed=str(engagement_id))}
+        except Exception as exc:  # noqa: BLE001 — fall back to an un-seeded trace
+            log.debug("trace_id seed failed: %s", exc)
+    with contextlib.ExitStack() as stack:
+        # Stamp a user id (+ session = engagement) on the trace so an operator can
+        # filter "my sessions" in the Langfuse UI. This MUST wrap the root span's
+        # creation: propagate_attributes sets the attributes on the root span AND
+        # every child span opened inside the run. (langfuse 4.x removed the old
+        # span.update_trace / client.update_current_trace — without this, traces
+        # arrive with NO session/user and the Sessions view stays empty.)
+        try:
+            from langfuse import propagate_attributes
+            stack.enter_context(propagate_attributes(
                 user_id=os.environ.get("APTS_LANGFUSE_USER_ID", "apts"),
-                session_id=str(engagement_id) if engagement_id else None)
+                session_id=str(engagement_id) if engagement_id else None))
         except Exception as exc:  # noqa: BLE001 — tracing must never break the stage
-            log.debug("Langfuse update_trace(user/session) failed: %s", exc)
+            log.debug("Langfuse propagate_attributes failed: %s", exc)
+        try:
+            span = stack.enter_context(client.start_as_current_observation(**obs_kwargs))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Langfuse trace_run(%s) failed to start: %s", name, exc)
+            yield None
+            return
         yield span
 
 

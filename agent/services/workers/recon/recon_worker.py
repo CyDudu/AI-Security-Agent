@@ -39,6 +39,12 @@ log = logging.getLogger("agent.workers.recon")
 
 MAX_STEPS = int(os.environ.get("APTS_RECON_MAX_STEPS", "20"))
 MAX_TOKENS = int(os.environ.get("APTS_RECON_MAX_TOKENS", "1200"))
+# Phase-0.4 SPA seed: one CODE-driven crawl_v2 of the base that ALWAYS runs before
+# the agent loop, so the SPA is rendered, its hash routes discovered and its forms
+# submitted every run — independent of whether the Phase-1 model calls crawl_v2.
+# (Ported from origin/main, whose recon is reliable precisely because of this seed.)
+SPA_SEED_MAX_PAGES = int(os.environ.get("APTS_RECON_SPA_SEED_PAGES", "25"))
+SPA_SEED_MAX_DEPTH = int(os.environ.get("APTS_RECON_SPA_SEED_DEPTH", "3"))
 DEFAULT_MODE = (os.environ.get("APTS_RECON_MODE", "broad") or "broad").lower()
 
 
@@ -176,6 +182,40 @@ class ReconWorker:
                                "count": len(kat_endpoints), "routes": routes,
                                "api_file_endpoints": api_file_eps})
 
+                    # ---- Phase 0.4: SPA seed (code) — one real-browser crawl of the
+                    # base that ALWAYS runs. katana does NOT mine client-side SPA routes
+                    # (hash routes like #/login live only in the JS router), so without
+                    # this the peek and the agent never see them and menu-gated forms
+                    # (login/register) are never submitted. crawl_v2 drives the live UI,
+                    # discovers those routes and fills+submits the forms it reaches —
+                    # so recon renders the app and records its traffic EVERY run, not
+                    # only when the Phase-1 model happens to call crawl_v2. Generic: no
+                    # route names; grading judges what is kept. (Ported from main.)
+                    seed_crawls: list[dict] = []
+                    try:
+                        seed = (await client.call_tool("crawl_v2", {
+                            "url": ctx.target_url,
+                            "max_pages": SPA_SEED_MAX_PAGES,
+                            "max_depth": SPA_SEED_MAX_DEPTH,
+                            "allow_domains": domains,
+                            **self._cred_args(creds)})).structured_content or {}
+                        seed_crawls = [seed]
+                        spa_routes = [p["url"] for p in (seed.get("pages") or [])
+                                      if "#/" in (p.get("url") or "")]
+                        # SPA routes FIRST so peek (routes[:60]) always covers them.
+                        seen_r: set = set(spa_routes)
+                        routes = spa_routes + [r for r in routes
+                                               if not (r in seen_r or seen_r.add(r))]
+                        log.info("recon phase0.4: SPA seed %d page(s), +%d hash route(s), "
+                                 "%d request(s) captured",
+                                 seed.get("pages_crawled", 0), len(spa_routes),
+                                 len(seed.get("observed_requests", []) or []))
+                    except Exception as exc:  # noqa: BLE001 — seed is best-effort
+                        log.warning("recon phase0.4 SPA seed failed: %s", exc)
+                    self._dump("phase04_spa_seed", {"routes": routes,
+                               "seed_requests": (len(seed_crawls[0].get("observed_requests", []) or [])
+                                                 if seed_crawls else 0)})
+
                     # ---- Phase 0.5: peek (code) → behaviour map of the routes ----
                     peek_pages = []
                     try:
@@ -213,7 +253,11 @@ class ReconWorker:
                         "tried": {}, "crawled": [], "crawls": [], "enum": [], "step": 0,
                     }, config={**config, "recursion_limit": 2 * MAX_STEPS + 5})
 
-                    crawls = out.get("crawls") or []
+                    # Prepend the Phase-0.4 seed so its captured requests (e.g. the
+                    # login POST and search XHR it fired) ALWAYS merge into the surface
+                    # alongside the agent's crawls — recon records traffic every run,
+                    # not only when the Phase-1 model chooses to call crawl_v2.
+                    crawls = seed_crawls + (out.get("crawls") or [])
                     self._dump("phase1_agent", {
                         "tool_calls": out.get("tried", {}), "enum": out.get("enum", []),
                         "crawled_pages": [p.get("url") for c in crawls
@@ -308,6 +352,13 @@ class ReconWorker:
             log.debug("recon phase dump %s failed: %s", tag, exc)
 
     # --- Phase 0 / 0.5 helpers -------------------------------------------- #
+    @staticmethod
+    def _cred_args(creds: dict) -> dict:
+        """Map the engagement credentials onto crawl_v2's auth kwargs — only the
+        keys that are set, so an unauthenticated scan passes nothing."""
+        return {k: creds[k] for k in ("headers", "cookies", "basic_auth")
+                if creds.get(k)}
+
     @staticmethod
     def _split_endpoints(endpoints: list[str], target: str) -> tuple[list[str], list[str]]:
         """Split katana's flat URI list into app ROUTES and concrete API/FILE endpoints."""
