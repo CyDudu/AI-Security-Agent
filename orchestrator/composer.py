@@ -327,10 +327,29 @@ def _scrub(messages: list) -> None:
     messages[:] = kept
 
 
+def _recon_stop_after(eid: str) -> str:
+    """The recon artifact's stop_after marker ('probe' | 'recon' | ''). Non-empty means
+    the run was launched to PAUSE after recon — used to fire the end-of-run follow-up at
+    that pause (the engagement never goes 'complete', so there's no terminal event)."""
+    u = _as_uuid(eid)
+    if u is None:
+        return ""
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payload->>'stop_after' FROM agent_results "
+                        "WHERE engagement_id = %s AND agent = 'recon'", (str(u),))
+            row = cur.fetchone()
+        return (row[0] if row and row[0] else "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 @chat_app.websocket("/ws")
 async def ws(websocket: WebSocket) -> None:
     await websocket.accept()
     send_lock = asyncio.Lock()
+    turn_lock = asyncio.Lock()        # one model turn at a time (user or auto follow-up)
+    followed_up: set = set()          # engagements that already got the end-of-run turn
 
     async def send(obj: dict) -> None:
         async with send_lock:
@@ -364,9 +383,25 @@ async def ws(websocket: WebSocket) -> None:
                             summary = await _summarise_loot(loot)
                             await send({"type": "loot", "engagement_id": eid,
                                         "summary": summary, "items": loot[:40]})
+            # Probe / recon-only PAUSE the run (no 'complete' ever comes) — fire the
+            # end-of-run follow-up here, once, when recon is done and marked paused.
+            if eid not in followed_up and prev.get("recon") in ("done", "completed"):
+                sa = await asyncio.to_thread(_recon_stop_after, eid)
+                if sa in ("probe", "recon"):
+                    followed_up.add(eid)
+                    kind = ("finished probing the attack surface (paused before findings)"
+                            if sa == "probe" else
+                            "finished the recon stage (paused before vulnerability testing)")
+                    asyncio.create_task(_run_followup(eid, kind))
             if st["status"] in ("complete", "failed", "cancelled"):
                 await send({"type": "engagement", "engagement_id": eid,
                             "status": st["status"]})
+                # Full run finished — act on any "do X at the end" the user asked for.
+                if st["status"] in ("complete", "failed") and eid not in followed_up:
+                    followed_up.add(eid)
+                    kind = ("completed — the full pipeline finished and the report is ready"
+                            if st["status"] == "complete" else "failed before finishing")
+                    asyncio.create_task(_run_followup(eid, kind))
                 return
             await asyncio.sleep(2)
 
@@ -436,6 +471,25 @@ async def ws(websocket: WebSocket) -> None:
                     content=json.dumps(payload, default=str)[:4000],
                     tool_call_id=call["id"]))
 
+    async def _run_followup(eid: str, kind: str) -> None:
+        """One model turn when a run finishes/pauses — so the composer acts on anything the
+        user asked for 'at the end' (summarise, look for X, open the report) and otherwise
+        gives a short status. Serialised with user turns via turn_lock. mcp_client/model
+        are the ws-session objects (bound by the time a run reaches this)."""
+        synth = (f"(system: engagement {eid} just {kind}. If earlier in this conversation "
+                 f"the user asked you to do something once it finished — summarise the "
+                 f"findings, look for a specific thing, fetch a value, open the report — DO "
+                 f"IT NOW for engagement {eid} using your read tools (get_recon_summary, "
+                 f"get_recon_findings, get_probe_summary, get_report, get_loot, "
+                 f"get_artifact), then reply. If they asked for nothing, give a one or two "
+                 f"line status of what finished and how to see it. Be brief; do NOT start a "
+                 f"new engagement.)")
+        try:
+            async with turn_lock:
+                await run_turn(synth, mcp_client, model)
+        except Exception as exc:  # noqa: BLE001 — a follow-up must never break the socket
+            log.warning("composer end-of-run follow-up failed: %s", exc)
+
     try:
         async with Client(CONTROL_URL) as mcp_client:
             tools = (await mcp_client.list_tools()).tools
@@ -455,7 +509,8 @@ async def ws(websocket: WebSocket) -> None:
                 text = (raw.get("text") or "").strip()
                 if not text:
                     continue
-                await run_turn(text, mcp_client, model)
+                async with turn_lock:            # serialise with auto follow-ups
+                    await run_turn(text, mcp_client, model)
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001 — keep one bad socket from taking the server

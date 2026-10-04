@@ -105,7 +105,7 @@ function persist(){try{localStorage.setItem(HKEY,JSON.stringify(history.slice(-2
 function render(cls,text){const el=document.createElement("div");el.className="msg "+cls;el.textContent=text;
   log.appendChild(el);log.scrollTop=log.scrollHeight;}
 function add(cls,text,save){render(cls,text);if(save!==false){history.push([cls,text]);persist();}}
-for(const [cls,text] of history) render(cls,text);   // replay saved transcript
+for(const [cls,text] of history){if(cls==="bot"&&text.startsWith("Hi")&&text.includes("APTS orchestrator"))continue;render(cls,text);}  // replay, minus any stale greeting
 function ensureCard(eid,target,status,fresh){
   if(cards[eid])return cards[eid];
   if(fresh)for(const k in cards)cards[k].el.classList.add("collapsed");  // only the new one open
@@ -144,7 +144,9 @@ function plog(c,t){const el=document.createElement("div");el.textContent=t;c.plo
 // --- live stage loading widget in the chat (visual only; never blocks input) ---
 const SLABEL=Object.fromEntries(STAGES);
 const swidgets={};
+const swTerminal=new Set();  // runs already finished — no live chat widget
 function swidget(eid){
+  if(swTerminal.has(eid))return null;      // finished run on load -> no chat widget
   if(swidgets[eid])return swidgets[eid];
   const el=document.createElement("div");el.className="swidget";
   el.innerHTML='<span class="spin"></span><span class="slabel">Starting…</span><span class="ssub"></span>';
@@ -155,7 +157,7 @@ function swidget(eid){
 function swStage(eid,agent,status){
   // reflect the REAL per-stage status (so a refresh shows "Recon running" or
   // "Recon finished", not a stuck "Starting…"), and announce each finish in chat.
-  const w=swidget(eid);
+  const w=swidget(eid);if(!w)return;
   const n=STAGES.findIndex(s=>s[0]===agent)+1, label=SLABEL[agent]||agent;
   const sub=n?("stage "+n+" / "+STAGES.length):"";
   if(status==="running"||status==="started"){
@@ -171,7 +173,8 @@ function swStage(eid,agent,status){
   // pending -> leave the widget as it is
 }
 function swDone(eid,status){
-  const w=swidgets[eid];if(!w)return;
+  if(["complete","failed","cancelled"].includes(status))swTerminal.add(eid);
+  const w=swidgets[eid];if(!w)return;   // only finalise a widget that ran live this session
   if(status==="complete"){w.el.classList.add("done");w.lab.textContent="Report ready";w.sub.textContent="pipeline complete — open it in the engagement card";}
   else if(status==="failed"){w.el.classList.add("fail");w.lab.textContent="Run failed";w.sub.textContent="";}
   else if(status==="cancelled"){w.el.classList.add("fail");w.lab.textContent="Run cancelled";w.sub.textContent="";}
@@ -179,11 +182,12 @@ function swDone(eid,status){
 const proto=location.protocol==="https:"?"wss":"ws";
 const sock=new WebSocket(`${proto}://${location.host}/ws`);
 sock.onmessage=e=>{const m=JSON.parse(e.data);
-  if(m.type==="assistant"){if(m.greeting&&hadHistory)return;add("bot",m.text);}
+  if(m.type==="assistant"){if(m.greeting){if(!hadHistory)render("bot",m.text);return;}add("bot",m.text);}  // greeting shown fresh, never saved (so it never goes stale)
   else if(m.type==="tool")add("tool","⚙ "+m.text);
   else if(m.type==="error")add("err","⚠ "+m.text);
   else if(m.type==="engagement_new"){ensureCard(m.engagement_id,m.target_url,m.status,m.fresh);
-    if(["running","created","started"].includes(m.status))swidget(m.engagement_id);}
+    if(["complete","failed","cancelled"].includes(m.status))swTerminal.add(m.engagement_id);  // finished on load
+    else if(["running","created","started"].includes(m.status))swidget(m.engagement_id);}
   else if(m.type==="progress"){const c=cards[m.engagement_id]||ensureCard(m.engagement_id);
     const r=c.rows[m.agent];if(r){r.className="stage "+(CLS[m.status]||"");
       r.querySelector(".st").textContent=WORD[m.status]||m.status;}
