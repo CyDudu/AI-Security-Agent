@@ -153,11 +153,22 @@ function swidget(eid){
   swidgets[eid]=w;return w;
 }
 function swStage(eid,agent,status){
-  if(status!=="running"&&status!=="started")return;      // only the agent now running
-  const w=swidget(eid);w.el.classList.remove("done","fail");
-  const n=STAGES.findIndex(s=>s[0]===agent)+1;
-  w.lab.textContent=(SLABEL[agent]||agent)+" running…";
-  w.sub.textContent=n?("stage "+n+" / "+STAGES.length):"";
+  // reflect the REAL per-stage status (so a refresh shows "Recon running" or
+  // "Recon finished", not a stuck "Starting…"), and announce each finish in chat.
+  const w=swidget(eid);
+  const n=STAGES.findIndex(s=>s[0]===agent)+1, label=SLABEL[agent]||agent;
+  const sub=n?("stage "+n+" / "+STAGES.length):"";
+  if(status==="running"||status==="started"){
+    w.el.classList.remove("done","fail");w.lab.textContent=label+" running…";w.sub.textContent=sub;
+  }else if(status==="done"||status==="completed"){
+    w.el.classList.remove("fail");w.el.classList.add("done");
+    w.lab.textContent=label+" finished";w.sub.textContent=sub;
+  }else if(status==="failed"){
+    w.el.classList.add("fail");w.lab.textContent=label+" failed";w.sub.textContent=sub;
+  }else if(status==="cancelled"||status==="skipped"){
+    w.lab.textContent=label+" "+status;w.sub.textContent=sub;
+  }
+  // pending -> leave the widget as it is
 }
 function swDone(eid,status){
   const w=swidgets[eid];if(!w)return;
