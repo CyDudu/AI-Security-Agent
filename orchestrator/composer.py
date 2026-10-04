@@ -433,7 +433,10 @@ async def ws(websocket: WebSocket) -> None:
                     "fresh": fresh})
         pollers[eid] = asyncio.create_task(poll_progress(eid))
 
-    async def run_turn(text: str, mcp_client: Client, model) -> None:
+    async def run_turn(text: str, mcp_client: Client, model,
+                       ephemeral: bool = False) -> None:
+        # ephemeral=True (auto end-of-run follow-ups): the UI shows the messages live but
+        # does NOT persist them, so they don't replay as stale clutter on the next refresh.
         messages.append(agentic.HumanMessage(content=text))
         for _ in range(MAX_STEPS):
             try:
@@ -463,12 +466,12 @@ async def ws(websocket: WebSocket) -> None:
                         "was dropped — call the tool again with valid JSON, or reply "
                         "directly)")))
                     continue
-                await send({"type": "assistant", "text": txt or "(no reply)"})
+                await send({"type": "assistant", "text": txt or "(no reply)", "ephemeral": ephemeral})
                 return
             for call in calls:
                 name = call["name"]
                 args = call.get("args") or {}
-                await send({"type": "tool", "text": _arg_summary(name, args)})
+                await send({"type": "tool", "text": _arg_summary(name, args), "ephemeral": ephemeral})
                 out = await mcp_client.call_tool(name, args)
                 payload = out.structured_content or {
                     "content": [getattr(b, "text", str(b)) for b in out.content]}
@@ -496,7 +499,7 @@ async def ws(websocket: WebSocket) -> None:
                  f"new engagement.)")
         try:
             async with turn_lock:
-                await run_turn(synth, mcp_client, model)
+                await run_turn(synth, mcp_client, model, ephemeral=True)
         except Exception as exc:  # noqa: BLE001 — a follow-up must never break the socket
             log.warning("composer end-of-run follow-up failed: %s", exc)
 

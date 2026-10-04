@@ -105,7 +105,7 @@ function persist(){try{localStorage.setItem(HKEY,JSON.stringify(history.slice(-2
 function render(cls,text){const el=document.createElement("div");el.className="msg "+cls;el.textContent=text;
   log.appendChild(el);log.scrollTop=log.scrollHeight;}
 function add(cls,text,save){render(cls,text);if(save!==false){history.push([cls,text]);persist();}}
-for(const [cls,text] of history){if(cls==="bot"&&text.startsWith("Hi")&&text.includes("APTS orchestrator"))continue;render(cls,text);}  // replay, minus any stale greeting
+for(const [cls,text] of history){if(cls==="bot"&&((text.startsWith("Hi")&&text.includes("APTS orchestrator"))||/^The engagement [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(text)))continue;render(cls,text);}  // replay, minus stale greeting + stale auto follow-ups
 function ensureCard(eid,target,status,fresh){
   if(cards[eid])return cards[eid];
   if(fresh)for(const k in cards)cards[k].el.classList.add("collapsed");  // only the new one open
@@ -182,8 +182,8 @@ function swDone(eid,status){
 const proto=location.protocol==="https:"?"wss":"ws";
 const sock=new WebSocket(`${proto}://${location.host}/ws`);
 sock.onmessage=e=>{const m=JSON.parse(e.data);
-  if(m.type==="assistant"){if(m.greeting){if(!hadHistory)render("bot",m.text);return;}add("bot",m.text);}  // greeting shown fresh, never saved (so it never goes stale)
-  else if(m.type==="tool")add("tool","⚙ "+m.text);
+  if(m.type==="assistant"){if(m.greeting){if(!hadHistory)render("bot",m.text);return;}add("bot",m.text,!m.ephemeral);}  // greeting shown fresh, never saved (so it never goes stale)
+  else if(m.type==="tool")add("tool","⚙ "+m.text,!m.ephemeral);
   else if(m.type==="error")add("err","⚠ "+m.text);
   else if(m.type==="engagement_new"){ensureCard(m.engagement_id,m.target_url,m.status,m.fresh);
     if(["complete","failed","cancelled"].includes(m.status))swTerminal.add(m.engagement_id);  // finished on load
