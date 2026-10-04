@@ -100,12 +100,18 @@ function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','
 // resets on a new connection — only the transcript is restored.
 const HKEY="apts_chat_v1";
 let history=[];try{history=JSON.parse(localStorage.getItem(HKEY)||"[]");}catch(_){history=[];}
+// Drop stale auto-messages (old greeting + end-of-run follow-ups) from the saved
+// transcript BEFORE anything else, so they never replay AND so hadHistory reflects the
+// real remaining chat (an all-stale transcript becomes empty -> the greeting shows).
+const _stale=([cls,text])=>cls==="bot"&&((text.startsWith("Hi")&&text.includes("APTS orchestrator"))||/^The engagement [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(text));
+history=history.filter(h=>!_stale(h));
 const hadHistory=history.length>0;
 function persist(){try{localStorage.setItem(HKEY,JSON.stringify(history.slice(-200)));}catch(_){}}
+persist();  // write the cleaned transcript back so the stale lines are gone for good
 function render(cls,text){const el=document.createElement("div");el.className="msg "+cls;el.textContent=text;
   log.appendChild(el);log.scrollTop=log.scrollHeight;}
 function add(cls,text,save){render(cls,text);if(save!==false){history.push([cls,text]);persist();}}
-for(const [cls,text] of history){if(cls==="bot"&&((text.startsWith("Hi")&&text.includes("APTS orchestrator"))||/^The engagement [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/.test(text)))continue;render(cls,text);}  // replay, minus stale greeting + stale auto follow-ups
+for(const [cls,text] of history) render(cls,text);   // replay the cleaned transcript
 function ensureCard(eid,target,status,fresh){
   if(cards[eid])return cards[eid];
   if(fresh)for(const k in cards)cards[k].el.classList.add("collapsed");  // only the new one open
