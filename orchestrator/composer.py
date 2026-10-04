@@ -363,6 +363,16 @@ async def ws(websocket: WebSocket) -> None:
         u = _as_uuid(eid)
         prev: dict[str, str] = {}
         loot_sent = False
+        # Suppress the end-of-run follow-up for a run that was ALREADY finished or paused
+        # when this session connected — otherwise refreshing re-announces every old run.
+        # Only a run that transitions to done/paused LIVE this session fires it.
+        st0 = await asyncio.to_thread(_status, u)
+        if st0:
+            if st0["status"] in ("complete", "failed", "cancelled"):
+                followed_up.add(eid)
+            elif st0["per_agent"].get("recon", {}).get("status") in ("done", "completed") \
+                    and await asyncio.to_thread(_recon_stop_after, eid) in ("probe", "recon"):
+                followed_up.add(eid)
         while True:
             st = await asyncio.to_thread(_status, u)
             if not st:
